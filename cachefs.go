@@ -96,10 +96,21 @@ func (c *CacheFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrO
 func (c *CacheFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	sourcePath := filepath.Join(c.sourceDir, name)
 	st := syscall.Stat_t{}
+	isImplicitDir := false
 	if err := syscall.Lstat(sourcePath, &st); err != nil {
-		return nil, syscall.ENOENT
+		// gcsfuse implicit dirs: stat fails but readdir works
+		if entries, err2 := os.ReadDir(sourcePath); err2 == nil && len(entries) >= 0 {
+			isImplicitDir = true
+			st.Mode = syscall.S_IFDIR | 0755
+		} else {
+			return nil, syscall.ENOENT
+		}
 	}
-	out.FromStat(&st)
+	if !isImplicitDir {
+		out.FromStat(&st)
+	} else {
+		out.Mode = fuse.S_IFDIR | 0755
+	}
 
 	child := &CacheNode{
 		sourceDir: c.sourceDir,
@@ -128,6 +139,11 @@ func (n *CacheNode) sourcePath() string {
 func (n *CacheNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	st := syscall.Stat_t{}
 	if err := syscall.Lstat(n.sourcePath(), &st); err != nil {
+		// gcsfuse implicit dirs
+		if _, err2 := os.ReadDir(n.sourcePath()); err2 == nil {
+			out.Mode = fuse.S_IFDIR | 0755
+			return fs.OK
+		}
 		return syscall.ENOENT
 	}
 	out.FromStat(&st)
@@ -138,10 +154,21 @@ func (n *CacheNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	childRel := filepath.Join(n.relPath, name)
 	sourcePath := filepath.Join(n.sourceDir, childRel)
 	st := syscall.Stat_t{}
+	isImplicitDir := false
 	if err := syscall.Lstat(sourcePath, &st); err != nil {
-		return nil, syscall.ENOENT
+		// gcsfuse implicit dirs: stat fails but readdir works
+		if entries, err2 := os.ReadDir(sourcePath); err2 == nil && len(entries) >= 0 {
+			isImplicitDir = true
+			st.Mode = syscall.S_IFDIR | 0755
+		} else {
+			return nil, syscall.ENOENT
+		}
 	}
-	out.FromStat(&st)
+	if !isImplicitDir {
+		out.FromStat(&st)
+	} else {
+		out.Mode = fuse.S_IFDIR | 0755
+	}
 
 	child := &CacheNode{
 		sourceDir: n.sourceDir,
