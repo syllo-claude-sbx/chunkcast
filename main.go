@@ -62,7 +62,7 @@ func main() {
 			FsName:     "chunkcast",
 			Name:       "chunkcast",
 			Debug:      *debug,
-			MaxRead:    1024 * 1024, // 1MB max read
+			MaxReadAhead: 1024 * 1024, // 1MB read-ahead
 		},
 	}
 
