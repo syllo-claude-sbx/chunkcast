@@ -221,20 +221,52 @@ func (n *CacheNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 }
 
 // Read serves data from local cache (hit) or source (miss + cache).
+// Uses ReadAt for cached blocks to avoid reading entire 32MB blocks
+// when only a small slice is needed (FUSE max_read is typically 128KB).
 func (f *CacheFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if off >= f.meta.Size {
 		return fuse.ReadResultData(nil), fs.OK
 	}
 
-	// Calculate which blocks we need
-	startBlock := int(off / f.meta.BlockSize)
 	endOff := off + int64(len(dest))
 	if endOff > f.meta.Size {
 		endOff = f.meta.Size
 	}
+	readLen := endOff - off
+
+	// For reads within a single block, use ReadAt directly on the cached file
+	startBlock := int(off / f.meta.BlockSize)
 	endBlock := int((endOff - 1) / f.meta.BlockSize)
 
-	// Read and assemble blocks
+	if startBlock == endBlock {
+		// Single block — read just the needed range
+		blockPath := filepath.Join(f.blockDir, fmt.Sprintf("%d.blk", startBlock))
+		blockStart := int64(startBlock) * f.meta.BlockSize
+		offsetInBlock := off - blockStart
+
+		// Try cached file with ReadAt (fast, no full block read)
+		if fd, err := os.Open(blockPath); err == nil {
+			defer fd.Close()
+			buf := make([]byte, readLen)
+			n, err := fd.ReadAt(buf, offsetInBlock)
+			if err == nil || (err == io.EOF && n > 0) {
+				return fuse.ReadResultData(buf[:n]), fs.OK
+			}
+		}
+
+		// Cache miss — fetch the full block and cache it
+		blockData, err := f.readBlock(startBlock)
+		if err != nil {
+			return nil, syscall.EIO
+		}
+		end := offsetInBlock + readLen
+		if end > int64(len(blockData)) {
+			end = int64(len(blockData))
+		}
+		return fuse.ReadResultData(blockData[offsetInBlock:end]), fs.OK
+	}
+
+	// Multi-block read — assemble from blocks
 	var result []byte
 	for blockIdx := startBlock; blockIdx <= endBlock; blockIdx++ {
 		blockData, err := f.readBlock(blockIdx)
@@ -244,7 +276,6 @@ func (f *CacheFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 		}
 
 		blockStart := int64(blockIdx) * f.meta.BlockSize
-		// Calculate slice within this block
 		sliceStart := int64(0)
 		if off > blockStart {
 			sliceStart = off - blockStart
